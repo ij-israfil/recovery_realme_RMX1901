@@ -16,6 +16,9 @@ jobs:
       DEVICE_PATH: 'device/realme/RMX1901'
       DEVICE_NAME: 'RMX1901'
       BUILD_TARGET: 'recovery'
+      USE_CCACHE: 1
+      CCACHE_EXEC: /usr/bin/ccache
+      CCACHE_DIR: ~/.ccache
     permissions:
       contents: write
     steps:
@@ -29,15 +32,24 @@ jobs:
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 24
-      
+
+    - name: Cache ccache
+      uses: actions/cache@v3
+      with:
+        path: ~/.ccache
+        key: ccache-${{ env.DEVICE_NAME }}-${{ env.MANIFEST_BRANCH }}-${{ github.sha }}
+        restore-keys: |
+          ccache-${{ env.DEVICE_NAME }}-${{ env.MANIFEST_BRANCH }}-
+
     - name: Build Environment
       run: |
         sudo apt update
         sudo apt -y upgrade
+        sudo apt install -y ccache
         git clone https://gitlab.com/OrangeFox/misc/scripts
         cd scripts
         sudo bash setup/android_build_env.sh
-      
+
     - name: Set-up Manifest
       run: |
         mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
@@ -60,17 +72,25 @@ jobs:
       id: fox_branch
       with:
         cond: ${{ env.MANIFEST_BRANCH == '11.0' || env.MANIFEST_BRANCH == '12.1' }}
-        if_true: lunch twrp_${{ env.DEVICE_NAME }}-eng && make clean && mka adbd ${{ env.BUILD_TARGET }}image
-        if_false: lunch omni_${{ env.DEVICE_NAME }}-eng && make clean && mka ${{ env.BUILD_TARGET }}image
-      
-    - name: Building OrangeFox
+        if_true: lunch twrp_${{ env.DEVICE_NAME }}-eng && mka adbd ${{ env.BUILD_TARGET }}image
+        if_false: lunch omni_${{ env.DEVICE_NAME }}-eng && mka ${{ env.BUILD_TARGET }}image
+
+    - name: Configure ccache & Build OrangeFox
       run: |
         cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}
+        export USE_CCACHE=1
+        export CCACHE_EXEC=/usr/bin/ccache
+        export CCACHE_DIR=~/.ccache
+        ccache -M 10G
+        ccache -z
         set +e
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         set -e
         ${{ steps.fox_branch.outputs.value }}
+        echo "::group::ccache stats"
+        ccache -s
+        echo "::endgroup::"
 
     - name: Set Build Date
       run: |
@@ -123,6 +143,13 @@ jobs:
         wget https://github.com/kinguser981/recovery-installer/releases/download/11256427880/recovery-installer.zip
         zip -ur recovery-installer.zip ${{ env.RECOVERY_TYPE }}.img
       continue-on-error: true
+
+    - name: Upload Recovery via Gofile
+      if: env.CHECK_IMG_IS_OK == 'true'
+      run: |
+        sudo wget https://raw.githubusercontent.com/ij-project/gofile-uploader/refs/heads/master/gofile -O "/usr/local/bin/gofile"
+        sudo chmod +x "/usr/local/bin/gofile"
+        gofile "${{ env.FILE_PATH }}"/Orange*.zip
 
     - name: Upload to Release
       if: env.CHECK_IMG_IS_OK == 'true'
