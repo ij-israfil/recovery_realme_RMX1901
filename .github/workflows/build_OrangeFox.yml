@@ -1,50 +1,177 @@
-name: Build-RMX1901-OrangeFox-recovery
-on: [workflow_dispatch]
+name: OrangeFox - Build
+
+on:
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
-   
+    name: Build OFRP by ${{ github.actor }}
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MANIFEST_BRANCH: '12.1'
+      DEVICE_TREE: 'https://github.com/ij-israfil/recovery_realme_RMX1901'
+      DEVICE_TREE_BRANCH: 'ofox'
+      DEVICE_PATH: 'device/realme/RMX1901'
+      DEVICE_NAME: 'RMX1901'
+      BUILD_TARGET: 'recovery'
+      USE_CCACHE: 1
+      CCACHE_EXEC: /usr/bin/ccache
+      CCACHE_DIR: ~/.ccache
+    permissions:
+      contents: write
     steps:
-    - name: "Cleanup Environment"
+    - name: Checkout
+      uses: actions/checkout@v7.0.1
+
+    - name: Clean-up
       uses: rokibhasansagar/slimhub_actions@main
 
-    - name: Set Swap Space
+    - name: Swap Space
       uses: pierotofy/set-swap-space@master
       with:
-        swap-size-gb: 11
-        
-    - name: Install dependencies
-      run: |
-        sudo apt-get update -y
-        sudo apt install git aria2 python2 -y
-        git clone https://gitlab.com/OrangeFox/misc/scripts --depth=1
-        cd scripts       
-        sudo bash setup/android_build_env.sh
-        cd -
-        mkdir OrangeFox_sync
-        cd OrangeFox_sync
-        git clone https://gitlab.com/OrangeFox/sync.git --depth=1
-        cd sync/
-        ./orangefox_sync.sh --branch 12.1 --path $GITHUB_WORKSPACE/fox_12.1 
-    
-    - name: Checkout Device Tree
-      uses: actions/checkout@v4.1.1
-      with:
-        path: fox_12.1/device/realme/RMX1901
-    
-    - name: Build recovery
-      run: |
-        cd fox_12.1
-        source build/envsetup.sh || true
-        lunch twrp_RMX1901-eng
-        mka adbd recoveryimage -j2
+        swap-size-gb: 24
 
-    - name: Upload recovery
-      uses: actions/upload-artifact@v4.3.0
+    - name: Cache ccache
+      uses: actions/cache@v6.1.0
       with:
-        name: RMX1901-OFOX-RUI1-RUI2-UNZIP
-        path: |
-          fox_12.1/out/target/product/*/Orange*.zip
+        path: ~/.ccache
+        key: ccache-${{ env.DEVICE_NAME }}-${{ env.MANIFEST_BRANCH }}-${{ github.sha }}
+        restore-keys: |
+          ccache-${{ env.DEVICE_NAME }}-${{ env.MANIFEST_BRANCH }}-
+
+    - name: Build Environment
+      run: |
+        sudo apt update
+        sudo apt -y upgrade
+        sudo apt install -y ccache
+        git clone https://gitlab.com/OrangeFox/misc/scripts
+        cd scripts
+        sudo bash setup/android_build_env.sh
+
+    - name: Set-up Manifest
+      run: |
+        mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
+        cd ${GITHUB_WORKSPACE}/OrangeFox
+        git config --global user.name "ij-israfil"
+        git config --global user.email "israfilkhan494@gmail.com"
+        git clone https://gitlab.com/OrangeFox/sync.git
+        cd sync
+        ./orangefox_sync.sh --branch ${{ env.MANIFEST_BRANCH }} --path ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}
+
+    - name: Clone Device Tree
+      run: |
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}
+        git clone ${{ env.DEVICE_TREE }} -b ${{ env.DEVICE_TREE_BRANCH }} ./${{ env.DEVICE_PATH }}
+        cd ${{ env.DEVICE_PATH }}
+        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Check Manifest Branch
+      uses: haya14busa/action-cond@v1.2.1
+      id: fox_branch
+      with:
+        cond: ${{ env.MANIFEST_BRANCH == '11.0' || env.MANIFEST_BRANCH == '12.1' }}
+        if_true: lunch twrp_${{ env.DEVICE_NAME }}-eng && mka adbd ${{ env.BUILD_TARGET }}image
+        if_false: lunch omni_${{ env.DEVICE_NAME }}-eng && mka ${{ env.BUILD_TARGET }}image
+
+    - name: Configure ccache & Build OrangeFox
+      run: |
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}
+        export USE_CCACHE=1
+        export CCACHE_EXEC=/usr/bin/ccache
+        export CCACHE_DIR=~/.ccache
+        ccache -M 10G
+        ccache -z
+        set +e
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        set -e
+        ${{ steps.fox_branch.outputs.value }}
+        echo "::group::ccache stats"
+        ccache -s
+        echo "::endgroup::"
+
+    - name: Set Build Date
+      run: |
+        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_DATE_FORMATTED=$(date +%d.%m.%Y)" >> $GITHUB_ENV
+        DEVICE_TREE_URL="${{ env.DEVICE_TREE }}"
+        if [[ "${DEVICE_TREE_URL}" == *.git ]]; then
+          DEVICE_TREE_URL="${DEVICE_TREE_URL%.git}"
+        fi
+        echo "DEVICE_TREE_URL=${DEVICE_TREE_URL}" >> $GITHUB_ENV
+
+    - name: Check if Recovery Exist
+      run: |
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}
+        if [ -f out/target/product/${{ env.DEVICE_NAME }}/OrangeFox*.img ]; then
+            echo "CHECK_IMG_IS_OK=true" >> $GITHUB_ENV
+            echo "FILE_PATH=${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}/out/target/product/${{ env.DEVICE_NAME }}" >> $GITHUB_ENV
+            echo "MD5_IMG=$(md5sum out/target/product/${{ env.DEVICE_NAME }}/OrangeFox*.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
+        elif [ -f out/target/product/${{ env.DEVICE_NAME }}/target/product/${{ env.DEVICE_NAME }}/OrangeFox*.img ]; then
+            echo "CHECK_IMG_IS_OK=true" >> $GITHUB_ENV
+            echo "FILE_PATH=${GITHUB_WORKSPACE}/OrangeFox/fox_${{ env.MANIFEST_BRANCH }}/out/target/product/${{ env.DEVICE_NAME }}/target/product/${{ env.DEVICE_NAME }}" >> $GITHUB_ENV
+            echo "MD5_IMG=$(md5sum out/target/product/${{ env.DEVICE_NAME }}/target/product/${{ env.DEVICE_NAME }}/OrangeFox*.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
+        else
+            echo "Recovery out directory is empty."
+            cd Exit
+        fi
+
+    - name: Rename the Recovery
+      run: |
+        cd ${{ env.FILE_PATH }}/
+        if [ "${{ env.BUILD_TARGET }}" = "boot" ]; then
+        mv OrangeFox*.img boot.img
+        echo "RECOVERY_TYPE=boot" >> $GITHUB_ENV
+        echo "boot.img file found!"
+        elif [ "${{ env.BUILD_TARGET }}" = "recovery" ]; then
+        mv OrangeFox*.img recovery.img
+        echo "RECOVERY_TYPE=recovery" >> $GITHUB_ENV
+        echo "recovery.img file found!"
+        elif [ "${{ env.BUILD_TARGET }}" = "vendorboot" ]; then
+        mv OrangeFox*.img vendor_boot.img
+        echo "RECOVERY_TYPE=vendor_boot" >> $GITHUB_ENV
+        echo "vendor_boot.img file found!"
+        else
+        echo "No Recovery file found!"
+        fi
+
+        # Rename OrangeFox zip to append formatted build date (DD.MM.YYYY)
+        for zip in OrangeFox*.zip; do
+          if [ -f "$zip" ]; then
+            filename="${zip%.zip}"
+            mv "$zip" "${filename}-${{ env.BUILD_DATE_FORMATTED }}.zip"
+          fi
+        done
+      continue-on-error: true
       
- 
+    - name: Include Recovery Installer
+      run: |
+        cd ${{ env.FILE_PATH }}/
+        wget https://github.com/kinguser981/recovery-installer/releases/download/11256427880/recovery-installer.zip
+        zip -ur recovery-installer.zip ${{ env.RECOVERY_TYPE }}.img
+      continue-on-error: true
+
+    - name: Upload Recovery via Gofile
+      if: env.CHECK_IMG_IS_OK == 'true'
+      run: |
+        sudo wget https://raw.githubusercontent.com/ij-project/gofile-uploader/refs/heads/master/gofile -O "/usr/local/bin/gofile"
+        sudo chmod +x "/usr/local/bin/gofile"
+        gofile "${{ env.FILE_PATH }}"/Orange*.zip
+
+    - name: Upload to Release
+      if: env.CHECK_IMG_IS_OK == 'true'
+      uses: softprops/action-gh-release@v3.0.3
+      with:
+        files: |
+          ${{ env.FILE_PATH }}/${{ env.RECOVERY_TYPE }}.img
+          ${{ env.FILE_PATH }}/recovery-installer.zip
+          ${{ env.FILE_PATH }}/OrangeFox*.zip
+        name: Unofficial OrangeFox for ${{ env.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          Build: ${{ env.MANIFEST_BRANCH }}
+          Device: [Device Tree/Branch](${{ env.DEVICE_TREE }}/tree/${{ env.DEVICE_TREE_BRANCH }})
+          Commit: Most recent [commit](${{ env.DEVICE_TREE }}/commit/${{ env.COMMIT_ID }}) during building.
+          
