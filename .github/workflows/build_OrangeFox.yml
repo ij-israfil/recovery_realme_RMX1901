@@ -1,50 +1,92 @@
 name: Build-RMX1901-OrangeFox-recovery
-on: [workflow_dispatch]
+
+on:
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
-   
+    name: Build OrangeFox
+    runs-on: ubuntu-22.04
+
     steps:
-    - name: "Cleanup Environment"
-      uses: rokibhasansagar/slimhub_actions@main
+    - name: Cleanup Environment
+      uses: rokibhasansagar/slimhub_actions@v25.42.5
 
     - name: Set Swap Space
-      uses: pierotofy/set-swap-space@master
+      uses: pierotofy/set-swap-space@v1.0
       with:
-        swap-size-gb: 11
-        
-    - name: Install dependencies
+        swap-size-gb: 12
+
+    - name: Set up Java 11
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '11'
+
+    - name: Install Dependencies & Setup Build Env
       run: |
-        sudo apt-get update -y
-        sudo apt install git aria2 python2 -y
+        sudo apt-get update -y && sudo apt-get upgrade -y
+        sudo apt-get install git aria2 ccache -y
+        
+        rm -rf scripts
         git clone https://gitlab.com/OrangeFox/misc/scripts --depth=1
         cd scripts       
+        
         sudo bash setup/android_build_env.sh
-        cd -
-        mkdir OrangeFox_sync
+        
+        export OLDPWD="$(pwd)"
+        bash setup/install_android_sdk.sh
+
+    - name: Sync OrangeFox Source
+      run: |
+        mkdir -p OrangeFox_sync
         cd OrangeFox_sync
         git clone https://gitlab.com/OrangeFox/sync.git --depth=1
-        cd sync/
-        ./orangefox_sync.sh --branch 12.1 --path $GITHUB_WORKSPACE/fox_12.1 
-    
-    - name: Checkout Device Tree
-      uses: actions/checkout@v4.1.1
-      with:
-        path: fox_12.1/device/realme/RMX1901
-    
-    - name: Build recovery
-      run: |
-        cd fox_12.1
-        source build/envsetup.sh || true
-        lunch twrp_RMX1901-eng
-        mka adbd recoveryimage -j2
+        cd sync
+        ./orangefox_sync.sh --branch 12.1 --path $HOME/fox_12.1
 
-    - name: Upload recovery
-      uses: actions/upload-artifact@v4.3.0
+    - name: Clone Device Tree
+      run: |
+        cd $HOME/fox_12.1
+        git clone -b ofox https://github.com/ij-israfil/recovery_realme_RMX1901 device/realme/RMX1901
+
+    - name: Setup CCache
+      run: |
+        cd $HOME/fox_12.1
+        export USE_CCACHE=1
+        export CCACHE_EXEC=/usr/bin/ccache
+        export CCACHE_DIR=$HOME/fox_12.1/.ccache
+        export CCACHE_MAXSIZE=10G
+        
+        ccache -M 10G
+        ccache -z
+
+    - name: Build Recovery
+      run: |
+        cd $HOME/fox_12.1
+        export ALLOW_MISSING_DEPENDENCIES=true
+        export USE_CCACHE=1
+        export CCACHE_EXEC=/usr/bin/ccache
+        export CCACHE_DIR=$HOME/fox_12.1/.ccache
+        
+        source build/envsetup.sh
+        lunch twrp_RMX1901-eng
+        mka adbd recoveryimage -j$(nproc --all)
+
+    - name: Upload Recovery Artifacts (GitHub)
+      uses: actions/upload-artifact@v4
       with:
-        name: RMX1901-OFOX-RUI1-RUI2-UNZIP
+        name: OrangeFox-RMX1901-Recovery
         path: |
-          fox_12.1/out/target/product/*/Orange*.zip
-      
- 
+          ~/fox_12.1/out/target/product/RMX1901/Orange*.zip
+          ~/fox_12.1/out/target/product/RMX1901/recovery.img
+        retention-days: 7
+
+    - name: Upload Recovery via Gofile
+      run: |
+        sudo wget https://raw.githubusercontent.com/ij-project/gofile-uploader/refs/heads/master/gofile -O "/usr/local/bin/gofile"
+        sudo chmod +x "/usr/local/bin/gofile"
+        
+        cd $HOME/fox_12.1/out/target/product/RMX1901
+        gofile Orange*.zip
+        
